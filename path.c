@@ -7,6 +7,13 @@
 #include <omp.h>
 #include "mt19937p.h"
 
+// how many threads?
+int n_threads = 1;
+
+// global timing constants
+double square_avg = 0.0;
+long   num_square = 0;
+
 //ldoc on
 /**
  * # The basic recurrence
@@ -106,8 +113,14 @@ static inline void deinfinitize(int n, int* l)
 
 void shortest_paths(int n, int* restrict l)
 {
+    printf("-------------------------------------------\n");
+    printf("Individual Squares:\n");
+
     // Generate l_{ij}^0 from adjacency matrix representation
+    double to_inf_start = omp_get_wtime();
     infinitize(n, l);
+    double to_inf_stop  = omp_get_wtime();
+
     for (int i = 0; i < n*n; i += n+1)
         l[i] = 0;
 
@@ -115,11 +128,32 @@ void shortest_paths(int n, int* restrict l)
     int* restrict lnew = (int*) calloc(n*n, sizeof(int));
     memcpy(lnew, l, n*n * sizeof(int));
     for (int done = 0; !done; ) {
+        double square_start = omp_get_wtime();
         done = square(n, l, lnew);
+        double square_stop  = omp_get_wtime();
+
+        //
+        // tmp just to make sure avg is legit
+        /////////////////////////////////////////
+        printf(" -- %.16g\n", square_stop - square_start);
+        /////////////////////////////////////////
+        //
+        //
+
+        // don't want to printf in here.
+        square_avg += square_stop-square_start;
+        num_square++;
         memcpy(l, lnew, n*n * sizeof(int));
     }
     free(lnew);
+    
+    double de_inf_start = omp_get_wtime();
     deinfinitize(n, l);
+    double de_inf_stop  = omp_get_wtime();
+
+    printf("To Inf: %.16g\n", to_inf_stop - to_inf_start);
+    printf("De Inf: %.16g\n", de_inf_stop - de_inf_start);
+    printf("-------------------------------------------\n");
 }
 
 /**
@@ -199,33 +233,42 @@ const char* usage =
     "  - n -- number of nodes (200)\n"
     "  - p -- probability of including edges (0.05)\n"
     "  - i -- file name where adjacency matrix should be stored (none)\n"
-    "  - o -- file name where output matrix should be stored (none)\n";
+    "  - o -- file name where output matrix should be stored (none)\n"
+    "  - t -- number of threads (default := omp_max_threads)\n";
 
 int main(int argc, char** argv)
 {
-    int n    = 200;            // Number of nodes
-    double p = 0.05;           // Edge probability
-    const char* ifname = NULL; // Adjacency matrix file name
-    const char* ofname = NULL; // Distance matrix file name
+    double overall_start = omp_get_wtime();
+
+    int n     = 200;                   // Number of nodes
+    double p  = 0.05;                  // Edge probability
+    n_threads = omp_get_max_threads(); // Number of threads to use with OMP
+    const char* ifname = NULL;         // Adjacency matrix file name
+    const char* ofname = NULL;         // Distance matrix file name
 
     // Option processing
     extern char* optarg;
-    const char* optstring = "hn:d:p:o:i:";
+    const char* optstring = "hn:d:p:o:i:t:";
     int c;
+    // int num_threads <-- defined at top for global scope
     while ((c = getopt(argc, argv, optstring)) != -1) {
         switch (c) {
         case 'h':
             fprintf(stderr, "%s", usage);
             return -1;
-        case 'n': n = atoi(optarg); break;
-        case 'p': p = atof(optarg); break;
-        case 'o': ofname = optarg;  break;
-        case 'i': ifname = optarg;  break;
+        case 'n': n         = atoi(optarg); break;
+        case 'p': p         = atof(optarg); break;
+        case 'o': ofname    = optarg;       break;
+        case 'i': ifname    = optarg;       break;
+        case 't': n_threads = atoi(optarg); break;
         }
     }
 
     // Graph generation + output
+    double gen_start = omp_get_wtime();
     int* l = gen_graph(n, p);
+    double gen_stop  = omp_get_wtime();
+
     if (ifname)
         write_matrix(ifname,  n, l);
 
@@ -234,15 +277,24 @@ int main(int argc, char** argv)
     shortest_paths(n, l);
     double t1 = omp_get_wtime();
 
-    printf("== OpenMP with %d threads\n", omp_get_max_threads());
-    printf("n:     %d\n", n);
-    printf("p:     %g\n", p);
-    printf("Time:  %g\n", t1-t0);
-    printf("Check: %X\n", fletcher16(l, n*n));
-
     // Generate output file
     if (ofname)
         write_matrix(ofname, n, l);
+
+    // check solution
+    int check = fletcher16(l, n*n);
+
+    double overall_stop = omp_get_wtime();
+    
+    printf("== OpenMP with %d threads\n", n_threads);
+    printf("n:     %d\n", n);
+    printf("p:     %g\n", p);
+    printf("Check: %X\n", check);
+    printf("-------------------------------------------\n");
+    printf("Timings:\n");
+    printf("Shortest Paths:  %.16g\n", t1 - t0);
+    printf("Square Average:  %.16g\n", square_avg / ((double)num_square));
+    printf("Overall:         %.16g\n", overall_stop - overall_start);
 
     // Clean up
     free(l);
