@@ -63,22 +63,24 @@ long   num_square = 0;
  * identical, and false otherwise.
  */
 TARGET_MIC
-int square(int n,        // Number of nodes
-           int * restrict l,    // Partial distance at step s
-           int * restrict lnew, // Partial distance at step s+1
-           int n_width,         // Width (x direction) of block
+int square(int n,                 // Number of nodes
+           int * restrict l,      // Partial distance at step s
+           int * restrict lnew,    // Partial distance at step s+1
+           int n_width,            // Width (x direction) of block
            int n_height,        // Height (y direction) of block
-           int grid_height,     // height of the problem dimension
-           int n_threads) {     // how many threads to use
+           int n_threads) {
 
     USE_ALIGN(l,    BYTE_ALIGN);
     USE_ALIGN(lnew, BYTE_ALIGN);
 
     int done = 1;
-    // #pragma omp parallel for       \
-    //         num_threads(n_threads) \
-    //         shared(l, lnew)        \
-    //         reduction(&& : done)   \
+    const int quad_height = n / 4;
+    const int quad_width  = n / 4;
+
+    #pragma omp parallel for       \
+            num_threads(n_threads) \
+            shared(l, lnew)        \
+            reduction(&& : done)   \
     // Major Blocks
     for(int J = 0; J < n_height; ++J) {
         for(int K = 0; K < n_height; ++K) {
@@ -86,35 +88,30 @@ int square(int n,        // Number of nodes
                 // Calculate ending indices for the set of blocks
                 // int j_end   = ((J+1)*height_size < n ? height_size : (n-(J*height_size)));
                 // int k_end   = ((K+1)*height_size < n ? height_size : (n-(K*height_size)));
-                int j_end   = ((J+1)*height_size < grid_height ? height_size : (grid_height-(J*height_size)));
-                int k_end   = ((K+1)*height_size < grid_height ? height_size : (grid_height-(K*height_size)));
-                int i_end   = ((I+1)*width_size  < n ? width_size  : (n-(I*width_size)));
+                // int i_end   = ((I+1)*width_size  < n ? width_size  : (n-(I*width_size)));
+                int j_end   = ((J+1)*height_size < quad_height ? height_size : (quad_height-(J*height_size)));
+                int k_end   = ((K+1)*height_size < n ? height_size : (n-(K*height_size)));
+                int i_end   = ((I+1)*width_size  < quad_width  ? width_size  : (quad_width-(I*width_size)));
 
-                int j_init  = J*height_size*grid_height;
-                int kn_init = K*height_size*grid_height;
+                int j_init  = J*height_size*quad_width;
+                int kn_init = K*height_size*quad_width;
                 int k_init  = K*height_size;
                 int i_init  = I*width_size;
-
-                // printf("I: [%d] -> [%d]\n",   i_init, i_end);
-                // printf("J: [%d] -> [%d]\n",   j_init, j_end);
-                // printf("K: [%d] -> [%d]\n\n", k_init, k_end);
-
+          
                 // Minor Blocks
-                for(int j = 0; j < j_end; ++j) {
-                    // int jn = j_init+j*n;
-                    int jn = j_init+j*grid_height;
+                for (int j = 0; j < j_end; ++j) {
+                    int jn = j_init+j*n;
             
-                    for(int k = 0; k < k_end; ++k) {
-                        // int kn  = kn_init+k*n;
-                        int kn  = kn_init+k*grid_height;
+                    for (int k = 0; k < k_end; ++k) {
+                        int kn  = kn_init+k*n;
                         int lkj = l[jn+k_init+k];
                         
-                        for(int i = 0; i < i_end; ++i) {
+                        for (int i = 0; i < i_end; ++i) {
                             int lij_ind = jn+i_init+i;
                             int lij = lnew[lij_ind];
                             int lik = l[kn+i_init+i];
-
-                            if(lik + lkj < lij) {
+                
+                            if (lik + lkj < lij) {
                                 lij = lik+lkj;
                                 lnew[lij_ind] = lij;
                                 done = 0;
@@ -193,58 +190,67 @@ void shortest_paths(int n, int * restrict l, int n_threads) {
     USE_ALIGN(lnew, BYTE_ALIGN);
     memcpy(lnew, l, n*n * sizeof(int));
 
-    // divide into ~even subgrids, top and bottom. if n is odd, the top half will be
-    // one row smaller than the bottom half
-    int half_h = n / 2;
-    int offset = n * half_h;
-    int parity = n % 2;
+    // divide into even subgrids, top and bottom, left and right.
+    // only works for n even!
+    //
+    //  UL | UR
+    // ----+----
+    //  BL | BR
+    //
+    int half     = n / 2;
+    int v_offset = n * half;
+    int h_offset = half;
 
-    int top_h = half_h;
-    int bot_h = half_h + parity;
+    int *ul_l = l;               int *ul_lnew = lnew;
+    int *bl_l = l + v_offset;    int *bl_lnew = lnew + v_offset;
+    int *ur_l = l + h_offset;    int *ur_lnew = lnew + h_offset;
+    int *br_l = bl_l + h_offset; int *br_lnew = bl_lnew + h_offset;
 
-    int *top_l = l;          int *top_lnew = lnew;
-    int *bot_l = l + offset; int *bot_lnew = lnew + offset;
-  
-    int *top_sig = &top_l[0];
-    int *bot_sig = &bot_l[0];
-
-    const int n_width = n/width_size + (n%width_size? 1 : 0);
+    // const int n_width = n/width_size + (n%width_size? 1 : 0);
     // const int n_height = n/ height_size + (n%height_size? 1 : 0);
-    const int top_n_height = top_h / height_size + (top_h % height_size ? 1 : 0);
-    const int bot_n_height = bot_h / height_size + (bot_h % height_size ? 1 : 0);
+    int quad = n / 4;
+    const int quad_width  = quad / width_size  + (quad % width_size  ? 1 : 0);
+    const int quad_height = quad / height_size + (quad % height_size ? 1 : 0);
+
 
     int first_iter = 1, top_done = 0, bot_done = 0;
-    for (int done = 0, top_done = 0, bot_done = 0; !(top_done && bot_done);) {//!done; done = top_done || bot_done) {
+    for (int ul = 0, ur = 0, bl = 0, br = 0; !(ul && ur && bl && br);) {//!done; done = top_done || bot_done) {
         double square_start = omp_get_wtime();
+
+        ul = square(n, ul_l, ul_lnew, quad_width, quad_height, n_threads);
+        ur = square(n, ur_l, ur_lnew, quad_width, quad_height, n_threads);
+
+        bl = square(n, bl_l, bl_lnew, quad_width, quad_height, n_threads);
+        br = square(n, br_l, br_lnew, quad_width, quad_height, n_threads);
 
         //
         // asynchronous offload to the first mic; send top half
         //
-#ifdef __INTEL_COMPILER
-        #pragma offload target(mic:0) \
-                in(n_threads)                                                     \
-                in(n)                                                             \
-                in(n_width)                                                       \
-                in(top_n_height)                                                  \
-                inout(top_l    : length(n*top_h) alloc_if(first_iter) free_if(0)) \
-                inout(top_lnew : length(n*top_h) alloc_if(first_iter) free_if(0))
-#endif
-        top_done = square(n, top_l, top_lnew, n_width, top_n_height, top_h, n_threads);
+// #ifdef __INTEL_COMPILER
+//         #pragma offload target(mic:0) \
+//                 in(n_threads)                                                     \
+//                 in(n)                                                             \
+//                 in(n_width)                                                       \
+//                 in(top_n_height)                                                  \
+//                 inout(top_l    : length(n*top_h) alloc_if(first_iter) free_if(0)) \
+//                 inout(top_lnew : length(n*top_h) alloc_if(first_iter) free_if(0))
+// #endif
+        // top_done = square(n, top_l, top_lnew, n_width, top_n_height, top_h, n_threads);
 
 
         //
         // asynchronous offload to the first mic; send bottom half
         //
-#ifdef __INTEL_COMPILER
-        #pragma offload target(mic:1) \
-                in(n_threads)                                                     \
-                in(n)                                                             \
-                in(n_width)                                                       \
-                in(bot_n_height)                                                  \
-                inout(bot_l    : length(n*bot_h) alloc_if(first_iter) free_if(0)) \
-                inout(bot_lnew : length(n*bot_h) alloc_if(first_iter) free_if(0))
-#endif
-        bot_done = square(n, bot_l, bot_lnew, n_width, bot_n_height, bot_h, n_threads);
+// #ifdef __INTEL_COMPILER
+//         #pragma offload target(mic:1) \
+//                 in(n_threads)                                                     \
+//                 in(n)                                                             \
+//                 in(n_width)                                                       \
+//                 in(bot_n_height)                                                  \
+//                 inout(bot_l    : length(n*bot_h) alloc_if(first_iter) free_if(0)) \
+//                 inout(bot_lnew : length(n*bot_h) alloc_if(first_iter) free_if(0))
+// #endif
+        // bot_done = square(n, bot_l, bot_lnew, n_width, bot_n_height, bot_h, n_threads);
         
 
 #ifdef __INTEL_COMPILER
@@ -404,6 +410,11 @@ int main(int argc, char** argv)
         case 'i': ifname    = optarg;       break;
         case 't': n_threads = atoi(optarg); break;
         }
+    }
+
+    if(n % 2) {
+        printf("We only support even graph sizes...goodbye\n");
+        return 0;
     }
 
     // Graph generation + output
